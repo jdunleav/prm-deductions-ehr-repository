@@ -1,0 +1,175 @@
+@startuml
+
+!include https://gist.githubusercontent.com/fishey2/c9d9d7c7426d3701959789c10e96fdb0/raw/2afa46ecf5e126ad563693a8dccfa3e7ee46a50c/nhs_stylesheet.iuml
+
+box gp2gp-adapter
+    participant "GP2GP Adapter" as GP2GP
+end box
+
+box ehr-repository
+    database "eHR AWS S3" as s3
+    participant "eHR Service" as eHR
+    database "eHR Database" as db
+end box
+
+autonumber "<b>[000]"
+
+loop for each message
+
+  GP2GP -> eHR    : POST /health-record/{conversationId}/message
+     note left: {\n\    "nhsNumber": "123456",\n\    "messageId": "UUID_1234", \n\    "manifest:": ["messageId_file1", "messageId_file2"]\n\ }
+     activate GP2GP
+
+     activate eHR
+
+      eHR -> eHR     : Validates request
+          note right: Checks the following: \n\ - conversationId: is UUIDv4 \n\ - nhsNumber: (optional) is numeric & has 10 digits \n\ - messageId: is UUIDv4 \n\ - manifest: (optional) isArray
+
+     else 422 Validation Error
+         eHR -[NHS_ERROR]-> GP2GP : Contains message with specific validation error
+     else
+
+  group persistHealthRecord(nhsNumber, conversationId, messageId, manifest)
+
+        eHR -> db     : MessageFragment.findOrCreateOne(messageId, transaction)
+
+        activate db
+
+        else 503 Sequelize error
+            db   -[NHS_ERROR]-> eHR    : Sequelise Error
+            eHR  -[NHS_ERROR]-> eHR : Roll back transaction
+            eHR  -[NHS_ERROR]-> GP2GP  : Sequelise Error
+        else
+
+        db    -> eHR    : messageFragment
+
+        deactivate db
+
+    alt If manifest is not empty
+        eHR -> db : messageFragment.containsManifest(messageId, transaction)
+          note right : containsManifest is creating an entry in health record \n\ manifest table and associates the messageIds \n\ defined in manifest 
+
+        activate db
+
+        else 503 Sequelize error
+            db   -[NHS_ERROR]-> eHR    : Sequelise Error
+            eHR  -[NHS_ERROR]-> eHR : Roll back transaction
+            eHR  -[NHS_ERROR]-> GP2GP  : Sequelise Error
+        else
+
+        db    -> eHR    : messageFragment
+
+        deactivate db
+    end
+
+    eHR -> db : messageFragment.withHealthRecord(conversationId, transaction)
+      note right :  Finds or creates a health record entry\n\ and associates it with message fragment entry
+      
+      activate db
+
+      else 503 Sequelize error
+          db   -[NHS_ERROR]-> eHR    : Sequelise Error
+          eHR  -[NHS_ERROR]-> eHR : Roll back transaction
+          eHR  -[NHS_ERROR]-> GP2GP  : Sequelise Error
+      else
+
+      db    -> eHR    : messageFragment
+
+      deactivate db
+
+    eHR -> db : messageFragment.getHealthRecord(transaction)
+      note right : Gets the health record entry from message \n\ fragment entry using association
+      activate db
+
+      else 503 Sequelize error
+          db   -[NHS_ERROR]-> eHR    : Sequelise Error
+          eHR  -[NHS_ERROR]-> eHR : Roll back transaction
+          eHR  -[NHS_ERROR]-> GP2GP  : Sequelise Error
+      else
+
+      db    -> eHR    : messageFragment
+
+      deactivate db
+
+    alt If nhsNumber
+        eHR -> db : healthRecord.withPatient(nhsNumber, transaction)
+          note right :  Finds or creates a patient entry\n\ and associates it with a health record entry
+          activate db
+
+          else 503 Sequelize error
+              db   -[NHS_ERROR]-> eHR    : Sequelise Error
+              eHR  -[NHS_ERROR]-> eHR : Roll back transaction
+              eHR  -[NHS_ERROR]-> GP2GP  : Sequelise Error
+          else
+
+          db    -> eHR    : healthRecord
+
+          deactivate db
+    
+    end
+
+    alt If manifest is not empty
+        eHR -> db : healthRecord.hasManifest(messageId, transaction)
+          note right :  Finds or creates a manifest entry\n\ and associates it with a health record entry
+          activate db
+
+          else 503 Sequelize error
+              db   -[NHS_ERROR]-> eHR    : Sequelise Error
+              eHR  -[NHS_ERROR]-> eHR : Roll back transaction
+              eHR  -[NHS_ERROR]-> GP2GP  : Sequelise Error
+          else
+
+          db    -> eHR    : healthRecord
+
+          deactivate db
+    end
+
+    eHR -> eHR : transaction.commit()
+
+  end
+
+
+  eHR   -> GP2GP  : Return presigned URL for S3
+  deactivate eHR
+
+  GP2GP -> s3     : Uploads artifact
+
+  activate s3
+  s3    -> GP2GP  : 200 OK - MessageFragment identify created
+  deactivate s3
+
+  GP2GP -> eHR    : PATCH /health-record/{conversationId}/message/{messageId}
+    note left: {\n\    "transferComplete": true\n\ }
+  activate eHR
+
+  group Confirm message fragment transfer
+
+    eHR   -> db     : MessageFragment.find(messageId, transaction)
+
+    activate db
+
+    else 503 Sequelize error
+        db   -[NHS_ERROR]-> eHR    : Sequelise Error
+        eHR  -[NHS_ERROR]-> eHR : Roll back transaction
+        eHR  -[NHS_ERROR]-> GP2GP  : Sequelise Error
+    else
+
+    db    -> eHR    : messageFragment
+
+    deactivate db
+
+    eHR   -> db     : MessageFragment.complete()
+
+    activate db
+    db    -> eHR    : message fragment updated
+    deactivate db
+
+    eHR -> eHR : transaction.commit()
+
+  end
+  eHR   -> GP2GP  : 200 OK - MessageFragment updated as completed
+  deactivate GP2GP
+  eHR   -> eHR    : updateHealthRecordComplete(conversationId)
+  deactivate eHR
+end
+@enduml

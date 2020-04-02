@@ -1,13 +1,39 @@
-FROM mhart/alpine-node:11 AS builder
-WORKDIR /app
-COPY . .
-RUN npm install
-RUN npm run build
+FROM node:12.14.1-alpine
 
-FROM mhart/alpine-node
+# Add root CA from deductions team to trusted certificates
+RUN apk update && \
+    apk add --no-cache openssl ca-certificates bash tini postgresql-client && \
+    rm -rf /var/cache/apk/*
+
+COPY ./certs/deductions.crt /usr/local/share/ca-certificates/deductions.crt
+RUN update-ca-certificates
+ENV NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/deductions.crt
+
+ENV AUTHORIZATION_KEYS="auth-key-1" \
+  EHR_REPO_SKIP_MIGRATION=false \
+  NODE_ENV="prod" \
+  NHS_ENVIRONMENT="" \
+  S3_BUCKET_NAME="" \
+  DATABASE_USER="" \
+  DATABASE_PASSWORD="" \
+  DATABASE_NAME="" \
+  DATABASE_HOST="" \
+  LOCALSTACK_URL=""
+
 WORKDIR /app
-COPY package*.json ./
+
+COPY package*.json  /app/
+COPY build/         /app/build
+COPY database/      /app/database
+COPY build/config/database.js /app/src/config/
+COPY .sequelizerc   /app/
+
+# Migration script
+COPY scripts/migrate-db.sh /usr/bin/run-ehr-server
+
 RUN npm install
-COPY --from=builder /app/build /app/build
+
 EXPOSE 3000
-CMD ["npm", "run", "start"]
+
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["/usr/bin/run-ehr-server"]

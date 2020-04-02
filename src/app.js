@@ -1,34 +1,39 @@
+import httpContext from 'async-local-storage';
 import express from 'express';
-import getSignedUrl from "./services/get-signed-url";
-import httpContext from 'express-http-context';
-//import swaggerUi from 'swagger-ui-express';
-//import swaggerDocument from './swagger.json';
+import { errorLogger, logger as requestLogger } from 'express-winston';
+import swaggerUi from 'swagger-ui-express';
+import errorEndpoint from './api/error';
+import health from './api/health';
+import { fragments } from './api/fragments';
+import { patients } from './api/patients';
+import { options } from './config/logging';
+import * as correlationInfo from './middleware/correlation';
+import * as logging from './middleware/logging';
+import swaggerDocument from './swagger.json';
+
+httpContext.enable();
 
 const app = express();
 
 app.use(express.json());
-app.use(httpContext.middleware);
+app.use(correlationInfo.middleware);
+app.use(requestLogger(options));
 
-app.get('/health', (req, res) => {
-    res.sendStatus(200);
+app.use('/health', logging.middleware, health);
+
+app.use('/fragments', logging.middleware, fragments);
+
+app.use('/patients', logging.middleware, patients);
+
+app.use('/error', logging.middleware, errorEndpoint);
+
+app.use('/swagger', swaggerUi.serve, swaggerUi.setup(swaggerDocument));
+
+app.use(errorLogger(options));
+
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  res.status(500).json({ error: err.message });
 });
 
-//app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument));
-
-app.post('/url', (req, res) => {
-    if(Object.keys(req.body).length ===0){
-        res.sendStatus((400));
-    }
-    else{
-      const url = getSignedUrl(req.body.registrationId, req.body.conversationId);
-      res.status(202).send(url);
-
-    }
-});
-
-app.use(function (err, req, res, next) {
-  console.error(err.stack);
-  res.status(500).send('Something broke!')
-});
-
-export default app
+export default app;
